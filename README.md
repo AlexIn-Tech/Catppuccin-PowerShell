@@ -62,10 +62,6 @@ To also ask WinGet to update packages that are already installed:
 
 Close every Windows Terminal window and open it again when setup finishes.
 
-## Safety and scope
-
-The script does not contain machine-specific values, user names, host names, API keys, or network addresses. It changes only the current user's PowerShell profile, current-user font registry entries, and Windows Terminal settings. Review the script before running it, as you should with any setup script.
-
 ## Font license
 
 `assets/fonts/FiraCode.zip` is FiraCode Nerd Font. It is distributed under the SIL Open Font License 1.1; the included license copy is at [licenses/FiraCode-OFL.txt](licenses/FiraCode-OFL.txt).
