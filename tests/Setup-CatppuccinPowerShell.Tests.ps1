@@ -10,3 +10,15 @@ Describe 'Bundled Nerd Font installation' {
         $content | Should Not Match 'omp font install'
     }
 }
+
+Describe 'WinFetch setup' {
+    It 'installs WinFetch and configures the bundled Catppuccin Windows image' {
+        $content = Get-Content -Raw -LiteralPath $scriptPath
+
+        $content | Should Match 'function Ensure-WinFetch'
+        $content | Should Match "Install-Script -Name 'winfetch'"
+        $content | Should Match 'function Configure-WinFetch'
+        $content | Should Match 'assets[\\/]images[\\/]windows-catppuccin\.png'
+        $content | Should Match 'windows-catppuccin\.png'
+    }
+}

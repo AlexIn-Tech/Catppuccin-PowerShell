@@ -3,7 +3,7 @@
 .SYNOPSIS
     Provision a modern Windows command-line environment:
     Windows Terminal + PowerShell 7 + PSReadLine + Oh My Posh +
-    FiraCode Nerd Font + Catppuccin Macchiato.
+    FiraCode Nerd Font + WinFetch + Catppuccin Macchiato.
 
 .DESCRIPTION
     Designed to be safe to re-run on multiple Windows computers.
@@ -12,6 +12,7 @@
       - Ensures Windows Terminal, PowerShell 7, and Oh My Posh are installed with WinGet.
       - Relaunches itself under PowerShell 7 when started from Windows PowerShell 5.1.
       - Installs the bundled FiraCode Nerd Font for the current user.
+      - Installs WinFetch and configures it with the bundled Catppuccin Windows image.
       - Exports the Oh My Posh catppuccin_macchiato theme locally.
       - Adds/replaces a managed block in the PowerShell 7 profile.
       - Enables PSReadLine history prediction and Catppuccin syntax colors.
@@ -292,6 +293,58 @@ function Install-BundledNerdFont {
     }
 }
 
+function Ensure-WinFetch {
+    Write-Step 'Installing WinFetch'
+
+    $installedScript = $null
+    if (Get-Command Get-InstalledScript -ErrorAction SilentlyContinue) {
+        $installedScript = Get-InstalledScript -Name 'winfetch' -ErrorAction SilentlyContinue
+    }
+
+    if ($installedScript) {
+        Write-Ok 'WinFetch is installed.'
+        return
+    }
+
+    if (-not (Get-Command Install-Script -ErrorAction SilentlyContinue)) {
+        throw 'Install-Script is unavailable. Install PowerShellGet, then run this script again.'
+    }
+
+    Install-Script -Name 'winfetch' -Scope CurrentUser -Force
+    Write-Ok 'WinFetch installed.'
+}
+
+function Configure-WinFetch {
+    Write-Step 'Configuring WinFetch'
+
+    $sourceImage = Join-Path $PSScriptRoot 'assets\images\windows-catppuccin.png'
+    if (-not (Test-Path -LiteralPath $sourceImage)) {
+        throw "Bundled WinFetch image was not found: $sourceImage"
+    }
+
+    $configDirectory = Join-Path $HOME '.config\winfetch'
+    $configPath = Join-Path $configDirectory 'config.ps1'
+    $imagePath = Join-Path $configDirectory 'windows-catppuccin.png'
+    New-Item -ItemType Directory -Path $configDirectory -Force | Out-Null
+
+    if (Test-Path -LiteralPath $configPath) {
+        $backup = Backup-File -Path $configPath
+        Write-Ok "WinFetch config backup: $backup"
+    }
+
+    Copy-Item -LiteralPath $sourceImage -Destination $imagePath -Force
+    $config = @'
+# Managed by Setup-CatppuccinPowerShell.ps1. Re-run the setup script to update.
+$image = Join-Path $HOME '.config\winfetch\windows-catppuccin.png'
+$imgwidth = 35
+$showpkgs = @('winget')
+'@
+    Write-Utf8NoBom -Path $configPath -Content ($config + "`r`n")
+    Write-Ok "WinFetch configured: $configPath"
+
+    return $configPath
+}
+
 function Get-WindowsTerminalSettingsPath {
     $stable = Join-Path $env:LOCALAPPDATA 'Packages\Microsoft.WindowsTerminal_8wekyb3d8bbwe\LocalState\settings.json'
     $unpackaged = Join-Path $env:LOCALAPPDATA 'Microsoft\Windows Terminal\settings.json'
@@ -526,6 +579,13 @@ if ($LASTEXITCODE -ne 0 -or -not (Test-Path $ompConfigPath)) {
 Write-Ok "Local prompt theme: $ompConfigPath"
 
 # -----------------------------------------------------------------------------
+# WinFetch
+# -----------------------------------------------------------------------------
+
+Ensure-WinFetch
+$winFetchConfigPath = Configure-WinFetch
+
+# -----------------------------------------------------------------------------
 # PowerShell execution policy (only loosen Restricted -> RemoteSigned)
 # -----------------------------------------------------------------------------
 
@@ -618,6 +678,7 @@ $validation = [ordered]@{
     'Oh My Posh'       = (& $omp version | Select-Object -First 1)
     'Nerd Font'        = $FontFace
     'OMP theme'        = $ompConfigPath
+    'WinFetch config'  = $winFetchConfigPath
     'PowerShell profile' = $profilePath
     'Terminal settings'  = (Get-WindowsTerminalSettingsPath)
 }

@@ -32,6 +32,7 @@ Always review a generated command before you run it.
 
 - Installs Windows Terminal, PowerShell 7, and Oh My Posh with WinGet.
 - Installs the repository-bundled FiraCode Nerd Font for the current user—no font download required.
+- Installs WinFetch and configures it to use the bundled Catppuccin Windows image.
 - Exports the `catppuccin_macchiato` Oh My Posh theme locally.
 - Adds a managed Catppuccin block to the PowerShell 7 profile with PSReadLine prediction and syntax colors.
 - Creates a Catppuccin Macchiato color scheme, app theme, and PowerShell 7 profile in Windows Terminal.
@@ -61,6 +62,16 @@ To also ask WinGet to update packages that are already installed:
 ```
 
 Close every Windows Terminal window and open it again when setup finishes.
+
+## WinFetch
+
+The setup installs WinFetch from the PowerShell Gallery, copies `windows-catppuccin.png` into your WinFetch configuration folder, and sets it as the WinFetch image. Open a new terminal and run:
+
+```powershell
+winfetch
+```
+
+WinFetch is not launched automatically with every terminal session.
 
 ## Font license
 
