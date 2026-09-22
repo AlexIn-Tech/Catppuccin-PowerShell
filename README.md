@@ -37,6 +37,24 @@ Always review a generated command before you run it.
 - Adds a managed Catppuccin block to the PowerShell 7 profile with PSReadLine prediction and syntax colors.
 - Creates a Catppuccin Macchiato color scheme, app theme, and PowerShell 7 profile in Windows Terminal.
 - Creates timestamped backups of existing Windows Terminal and PowerShell profile files before changing them.
+- Validates the result and prints a `[PASS]`/`[FAIL]` report for every component.
+
+## Re-running and resilience
+
+The script is written to be run again at any time, including after a failed run:
+
+- Each step is isolated. If one component fails, the others still get configured, the failure is listed in the summary, and the script exits with a non-zero code.
+- Font files are only rewritten when their contents actually differ, so a second run copies nothing.
+- A font that Windows currently has loaded is replaced by renaming the in-use file aside first. This is what the error *"The requested operation cannot be performed on a file with a user-mapped section open"* means, and it no longer stops the setup.
+- A half-finished font install (files on disk but no registry entries) is repaired rather than skipped.
+
+## Tests
+
+```powershell
+Invoke-Pester -Path .\tests
+```
+
+The suite dot-sources the setup script with `-LoadFunctionsOnly`, which defines its functions without running any provisioning step. Font tests use throwaway directories and a throwaway registry key, so they never touch your installed fonts.
 
 ## Requirements
 

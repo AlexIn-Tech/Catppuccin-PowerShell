@@ -22,6 +22,22 @@
       - Adds a Catppuccin Macchiato Windows Terminal application theme.
       - Creates timestamped backups before modifying existing Terminal/profile files.
 
+    Resilience:
+      - Every optional step is isolated. One failing step warns and the rest of
+        the setup still runs; a summary of failures is printed at the end and
+        the script exits with a non-zero code.
+      - Font files are only rewritten when their contents actually differ, and a
+        font that Windows currently has memory-mapped is replaced by renaming the
+        in-use file aside first. That is the situation behind the error
+        "The requested operation cannot be performed on a file with a
+        user-mapped section open."
+      - The font step is self-healing: it repairs a half-finished install (files
+        present but registry entries missing) instead of skipping or failing.
+
+.PARAMETER LoadFunctionsOnly
+    Dot-source the script to define its helper functions without running any of
+    the provisioning steps. Used by tests/Setup-CatppuccinPowerShell.Tests.ps1.
+
 .NOTES
     Run as your normal user. Administrator rights are not required for the normal setup.
     WinGet may display UAC if a package installer requires elevation.
@@ -32,7 +48,8 @@ param(
     [string]$FontName = 'FiraCode',
     [string]$FontFace = 'FiraCode Nerd Font',
     [string]$OhMyPoshTheme = 'catppuccin_macchiato',
-    [switch]$UpgradePackages
+    [switch]$UpgradePackages,
+    [switch]$LoadFunctionsOnly
 )
 
 Set-StrictMode -Version Latest
@@ -62,6 +79,52 @@ function Write-Ok {
 function Write-Warn {
     param([Parameter(Mandatory)][string]$Message)
     Write-Warning $Message
+}
+
+function Write-Fail {
+    param([Parameter(Mandatory)][string]$Message)
+    Write-Host "    [FAIL] $Message" -ForegroundColor Red
+}
+
+# -----------------------------------------------------------------------------
+# Step isolation
+#
+# A single unavailable component (WinFetch, Windows Terminal, ...) must not cost
+# you the whole setup. Non-critical steps record their failure and the script
+# keeps going; the summary at the end lists what did not work.
+# -----------------------------------------------------------------------------
+
+$script:SetupFailures = [System.Collections.Generic.List[string]]::new()
+
+function Reset-SetupFailures {
+    $script:SetupFailures = [System.Collections.Generic.List[string]]::new()
+}
+
+function Get-SetupFailures {
+    return @($script:SetupFailures)
+}
+
+function Invoke-SetupStep {
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][scriptblock]$Action,
+        [switch]$Critical
+    )
+
+    try {
+        # The step runs in its own scope, so anything a later step needs has to
+        # come back as output:  $path = Invoke-SetupStep -Name x -Action { ... }
+        & $Action
+    }
+    catch {
+        if ($Critical) {
+            throw
+        }
+
+        $message = "$Name : $($_.Exception.Message)"
+        Write-Fail $message
+        $script:SetupFailures.Add($message)
+    }
 }
 
 function Refresh-ProcessPath {
@@ -235,21 +298,44 @@ function Set-ManagedProfileBlock {
     Write-Utf8NoBom -Path $ProfilePath -Content $newContent
 }
 
-function Test-FontInstalled {
-    param([Parameter(Mandatory)][string]$FaceName)
+$UserFontDirectory = Join-Path $env:LOCALAPPDATA 'Microsoft\Windows\Fonts'
+$UserFontRegistryPath = 'HKCU:\Software\Microsoft\Windows NT\CurrentVersion\Fonts'
+$MachineFontRegistryPath = 'HKLM:\Software\Microsoft\Windows NT\CurrentVersion\Fonts'
 
-    $fontRegistryKeys = @(
-        'HKCU:\Software\Microsoft\Windows NT\CurrentVersion\Fonts',
-        'HKLM:\Software\Microsoft\Windows NT\CurrentVersion\Fonts'
+# Suffix used for a font file that had to be renamed out of the way because it
+# was still mapped into memory. Cleaned up on the next run.
+$StaleFontSuffix = '.catppuccin-stale-'
+
+function Test-FontInstalled {
+    param(
+        [Parameter(Mandatory)][string]$FaceName,
+        [string[]]$RegistryPaths = @($UserFontRegistryPath, $MachineFontRegistryPath),
+        [string]$FontDirectory = $UserFontDirectory
     )
 
-    foreach ($key in $fontRegistryKeys) {
+    foreach ($key in $RegistryPaths) {
         if (-not (Test-Path $key)) {
             continue
         }
 
-        $properties = (Get-ItemProperty -Path $key).PSObject.Properties
-        if ($properties.Name | Where-Object { $_ -like "*$FaceName*" }) {
+        $properties = @((Get-ItemProperty -Path $key).PSObject.Properties)
+        foreach ($property in $properties) {
+            # Match the display name ("FiraCode Nerd Font Bold (TrueType)") or
+            # the file name it points at ("FiraCodeNerdFont-Bold.ttf").
+            if ($property.Name -like "*$FaceName*") { return $true }
+            if (($property.Value -is [string]) -and ($property.Value -like "*$($FaceName -replace ' ', '')*")) { return $true }
+        }
+    }
+
+    # A font can be present on disk while its registry entry is missing, e.g.
+    # when an earlier run was interrupted partway through.
+    $compactName = $FaceName -replace ' ', ''
+    foreach ($directory in @($FontDirectory, (Join-Path $env:WINDIR 'Fonts'))) {
+        if ([string]::IsNullOrWhiteSpace($directory) -or -not (Test-Path -LiteralPath $directory)) {
+            continue
+        }
+
+        if (Get-ChildItem -LiteralPath $directory -Filter "$compactName*" -File -ErrorAction SilentlyContinue | Select-Object -First 1) {
             return $true
         }
     }
@@ -257,40 +343,404 @@ function Test-FontInstalled {
     return $false
 }
 
+function Test-FileContentEqual {
+    param(
+        [Parameter(Mandatory)][string]$ReferencePath,
+        [Parameter(Mandatory)][string]$DifferencePath
+    )
+
+    if (-not (Test-Path -LiteralPath $ReferencePath) -or -not (Test-Path -LiteralPath $DifferencePath)) {
+        return $false
+    }
+
+    $reference = Get-Item -LiteralPath $ReferencePath
+    $difference = Get-Item -LiteralPath $DifferencePath
+    if ($reference.Length -ne $difference.Length) {
+        return $false
+    }
+
+    try {
+        $referenceHash = (Get-FileHash -LiteralPath $ReferencePath -Algorithm SHA256).Hash
+        $differenceHash = (Get-FileHash -LiteralPath $DifferencePath -Algorithm SHA256).Hash
+        return ($referenceHash -eq $differenceHash)
+    }
+    catch {
+        # Unreadable destination: treat it as different so we try to replace it.
+        return $false
+    }
+}
+
+function Get-FontDisplayName {
+    <#
+        Reads the full font name (name ID 4) out of the TrueType 'name' table so
+        the registry gets the name Windows itself would use. Falls back to the
+        file's base name, which is still unique and stable, if anything about
+        the file is unexpected.
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+
+    $fallback = [System.IO.Path]::GetFileNameWithoutExtension($Path)
+
+    try {
+        $stream = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read,
+            ([System.IO.FileShare]'ReadWrite, Delete'))
+    }
+    catch {
+        return $fallback
+    }
+
+    try {
+        function Read-Exact {
+            param($Stream, [int]$Count)
+            $buffer = New-Object byte[] $Count
+            $read = 0
+            while ($read -lt $Count) {
+                $chunk = $Stream.Read($buffer, $read, $Count - $read)
+                if ($chunk -le 0) { throw 'Unexpected end of font file.' }
+                $read += $chunk
+            }
+            return $buffer
+        }
+        function Get-UInt16BE { param($Bytes, [int]$Offset) return [int](([int]$Bytes[$Offset] -shl 8) -bor [int]$Bytes[$Offset + 1]) }
+        function Get-UInt32BE {
+            param($Bytes, [int]$Offset)
+            return ([uint32]$Bytes[$Offset] -shl 24) -bor ([uint32]$Bytes[$Offset + 1] -shl 16) -bor
+                   ([uint32]$Bytes[$Offset + 2] -shl 8) -bor [uint32]$Bytes[$Offset + 3]
+        }
+
+        $header = Read-Exact -Stream $stream -Count 12
+
+        # TrueType collection: jump to the first font's offset table.
+        if ([System.Text.Encoding]::ASCII.GetString($header, 0, 4) -eq 'ttcf') {
+            $stream.Position = 12
+            $offsets = Read-Exact -Stream $stream -Count 4
+            $stream.Position = [int](Get-UInt32BE -Bytes $offsets -Offset 0)
+            $header = Read-Exact -Stream $stream -Count 12
+        }
+
+        $tableCount = Get-UInt16BE -Bytes $header -Offset 4
+        if ($tableCount -le 0 -or $tableCount -gt 512) { return $fallback }
+
+        $records = Read-Exact -Stream $stream -Count ($tableCount * 16)
+        $nameTableOffset = -1
+        for ($i = 0; $i -lt $tableCount; $i++) {
+            $recordOffset = $i * 16
+            if ([System.Text.Encoding]::ASCII.GetString($records, $recordOffset, 4) -eq 'name') {
+                $nameTableOffset = [int](Get-UInt32BE -Bytes $records -Offset ($recordOffset + 8))
+                break
+            }
+        }
+        if ($nameTableOffset -lt 0) { return $fallback }
+
+        $stream.Position = $nameTableOffset
+        $nameHeader = Read-Exact -Stream $stream -Count 6
+        $recordCount = Get-UInt16BE -Bytes $nameHeader -Offset 2
+        $stringStorageOffset = Get-UInt16BE -Bytes $nameHeader -Offset 4
+        if ($recordCount -le 0) { return $fallback }
+
+        $nameRecords = Read-Exact -Stream $stream -Count ($recordCount * 12)
+
+        $best = $null
+        $bestRank = -1
+        for ($i = 0; $i -lt $recordCount; $i++) {
+            $offset = $i * 12
+            $platformId = Get-UInt16BE -Bytes $nameRecords -Offset $offset
+            $nameId = Get-UInt16BE -Bytes $nameRecords -Offset ($offset + 6)
+            if ($nameId -ne 4) { continue }   # 4 = full font name
+
+            # Prefer the Windows/Unicode record, fall back to the Macintosh one.
+            $rank = if ($platformId -eq 3) { 2 } elseif ($platformId -eq 1) { 1 } else { 0 }
+            if ($rank -le $bestRank) { continue }
+
+            $length = Get-UInt16BE -Bytes $nameRecords -Offset ($offset + 8)
+            $stringOffset = Get-UInt16BE -Bytes $nameRecords -Offset ($offset + 10)
+            if ($length -le 0) { continue }
+
+            $stream.Position = $nameTableOffset + $stringStorageOffset + $stringOffset
+            $stringBytes = Read-Exact -Stream $stream -Count $length
+            $value = if ($platformId -eq 3) {
+                [System.Text.Encoding]::BigEndianUnicode.GetString($stringBytes)
+            }
+            else {
+                [System.Text.Encoding]::ASCII.GetString($stringBytes)
+            }
+
+            $value = $value.Trim()
+            if (-not [string]::IsNullOrWhiteSpace($value)) {
+                $best = $value
+                $bestRank = $rank
+            }
+        }
+
+        if ([string]::IsNullOrWhiteSpace($best)) { return $fallback }
+        return $best
+    }
+    catch {
+        return $fallback
+    }
+    finally {
+        $stream.Dispose()
+    }
+}
+
+function Copy-FontFile {
+    <#
+        Copies a font into place without ever aborting the setup.
+
+        Windows refuses to overwrite a file that has an open user-mapped
+        section, which is exactly what happens when the font is already loaded:
+            "The requested operation cannot be performed on a file with a
+             user-mapped section open."
+
+        The file can still be *renamed* though, so an in-use font is moved aside
+        and the new one is copied into the freed name. The renamed leftover is
+        deleted if Windows lets go of it, and otherwise cleaned up on a later run.
+
+        Returns an object with Status =
+            UpToDate | Copied | Replaced | Failed
+    #>
+    param(
+        [Parameter(Mandatory)][string]$SourcePath,
+        [Parameter(Mandatory)][string]$DestinationPath,
+        [int]$MaxAttempts = 3,
+        [int]$RetryDelayMilliseconds = 400
+    )
+
+    if (-not (Test-Path -LiteralPath $SourcePath)) {
+        throw "Source font file was not found: $SourcePath"
+    }
+
+    $name = Split-Path -Leaf $DestinationPath
+    $existed = Test-Path -LiteralPath $DestinationPath
+
+    if ($existed -and (Test-FileContentEqual -ReferencePath $SourcePath -DifferencePath $DestinationPath)) {
+        return [pscustomobject]@{ Name = $name; Status = 'UpToDate'; Message = $null }
+    }
+
+    $lastError = $null
+    for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+        try {
+            Copy-Item -LiteralPath $SourcePath -Destination $DestinationPath -Force -ErrorAction Stop
+            $status = if ($existed) { 'Replaced' } else { 'Copied' }
+            return [pscustomobject]@{ Name = $name; Status = $status; Message = $null }
+        }
+        catch {
+            $lastError = $_.Exception.Message
+        }
+
+        if (Test-Path -LiteralPath $DestinationPath) {
+            $stalePath = "$DestinationPath$StaleFontSuffix$([guid]::NewGuid().ToString('N').Substring(0, 8))"
+            try {
+                Rename-Item -LiteralPath $DestinationPath -NewName (Split-Path -Leaf $stalePath) -ErrorAction Stop
+                Copy-Item -LiteralPath $SourcePath -Destination $DestinationPath -Force -ErrorAction Stop
+                Remove-Item -LiteralPath $stalePath -Force -ErrorAction SilentlyContinue
+                return [pscustomobject]@{ Name = $name; Status = 'Replaced'; Message = $null }
+            }
+            catch {
+                $lastError = $_.Exception.Message
+                # Put the original name back if the rename worked but the copy did not.
+                if ((Test-Path -LiteralPath $stalePath) -and -not (Test-Path -LiteralPath $DestinationPath)) {
+                    Rename-Item -LiteralPath $stalePath -NewName $name -ErrorAction SilentlyContinue
+                }
+            }
+        }
+
+        if ($attempt -lt $MaxAttempts) {
+            Start-Sleep -Milliseconds $RetryDelayMilliseconds
+        }
+    }
+
+    return [pscustomobject]@{ Name = $name; Status = 'Failed'; Message = $lastError }
+}
+
+function Register-FontFile {
+    <#
+        Writes the HKCU font registry entry only when it is missing or wrong, so
+        re-runs stay quiet. Returns 'UpToDate' or 'Registered'.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$RegistryPath,
+        [Parameter(Mandatory)][string]$DisplayName,
+        [Parameter(Mandatory)][string]$FileName
+    )
+
+    $existing = Get-ItemProperty -Path $RegistryPath -Name $DisplayName -ErrorAction SilentlyContinue
+    if ($existing -and ($existing.$DisplayName -eq $FileName)) {
+        return 'UpToDate'
+    }
+
+    New-ItemProperty -Path $RegistryPath -Name $DisplayName -Value $FileName -PropertyType String -Force | Out-Null
+    return 'Registered'
+}
+
+function Add-FontToCurrentSession {
+    <#
+        Best-effort: make the font usable without signing out, the way the
+        Windows font installer does (AddFontResource + WM_FONTCHANGE broadcast).
+        Purely cosmetic - never let it break the setup.
+    #>
+    param([Parameter(Mandatory)][string[]]$Paths)
+
+    try {
+        if (-not ('CatppuccinSetup.NativeFonts' -as [type])) {
+            Add-Type -Namespace 'CatppuccinSetup' -Name 'NativeFonts' -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("gdi32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+public static extern int AddFontResourceW(string lpFileName);
+
+[System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Auto)]
+public static extern int SendMessageTimeout(System.IntPtr hWnd, uint Msg, System.IntPtr wParam, System.IntPtr lParam, uint fuFlags, uint uTimeout, out System.IntPtr lpdwResult);
+'@ -ErrorAction Stop
+        }
+
+        foreach ($path in $Paths) {
+            [void][CatppuccinSetup.NativeFonts]::AddFontResourceW($path)
+        }
+
+        $HWND_BROADCAST = [System.IntPtr]0xFFFF
+        $WM_FONTCHANGE = 0x001D
+        $SMTO_ABORTIFHUNG = 0x0002
+        $result = [System.IntPtr]::Zero
+        [void][CatppuccinSetup.NativeFonts]::SendMessageTimeout($HWND_BROADCAST, $WM_FONTCHANGE,
+            [System.IntPtr]::Zero, [System.IntPtr]::Zero, $SMTO_ABORTIFHUNG, 1000, [ref]$result)
+        return $true
+    }
+    catch {
+        return $false
+    }
+}
+
 function Install-BundledNerdFont {
-    param([Parameter(Mandatory)][string]$ArchivePath)
+    <#
+        Installs every .ttf from the bundled archive for the current user.
+
+        Idempotent and self-healing: unchanged files are left alone, changed
+        files are replaced even while in use, and missing registry entries are
+        recreated. A file that genuinely cannot be written is reported and the
+        remaining fonts are still installed.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$ArchivePath,
+        [string]$FontDirectory = $UserFontDirectory,
+        [string]$RegistryPath = $UserFontRegistryPath,
+        [int]$MaxAttempts = 3,
+        [int]$RetryDelayMilliseconds = 400,
+        # Loading a font into the current process maps the file into memory,
+        # which is undesirable when installing into a throwaway directory.
+        [switch]$SkipSessionRegistration
+    )
 
     if (-not (Test-Path -LiteralPath $ArchivePath)) {
         throw "Bundled Nerd Font archive was not found: $ArchivePath"
     }
 
-    $fontDirectory = Join-Path $env:LOCALAPPDATA 'Microsoft\Windows\Fonts'
-    $fontRegistryPath = 'HKCU:\Software\Microsoft\Windows NT\CurrentVersion\Fonts'
     $extractionDirectory = Join-Path ([System.IO.Path]::GetTempPath()) ("CatppuccinPowerShell-Fonts-" + [guid]::NewGuid().ToString('N'))
 
-    try {
-        New-Item -ItemType Directory -Path $fontDirectory -Force | Out-Null
-        New-Item -Path $fontRegistryPath -Force | Out-Null
-        Expand-Archive -LiteralPath $ArchivePath -DestinationPath $extractionDirectory -Force
+    $summary = [ordered]@{
+        Total      = 0
+        Installed  = 0   # copied or replaced
+        UpToDate   = 0
+        Registered = 0
+        Failed     = @()
+    }
 
-        $fontFiles = Get-ChildItem -LiteralPath $extractionDirectory -Filter '*.ttf' -File -Recurse
-        if (-not $fontFiles) {
+    try {
+        New-Item -ItemType Directory -Path $FontDirectory -Force | Out-Null
+
+        # NEVER use New-Item -Force on an existing registry key: for the
+        # registry provider that recreates the key and silently deletes every
+        # value in it, i.e. every font the user already had registered.
+        if (-not (Test-Path -LiteralPath $RegistryPath)) {
+            New-Item -Path $RegistryPath -Force | Out-Null
+        }
+
+        try {
+            Expand-Archive -LiteralPath $ArchivePath -DestinationPath $extractionDirectory -Force
+        }
+        catch {
+            throw "Could not extract the bundled font archive '$ArchivePath': $($_.Exception.Message)"
+        }
+
+        $fontFiles = @(Get-ChildItem -LiteralPath $extractionDirectory -Filter '*.ttf' -File -Recurse)
+        if ($fontFiles.Count -eq 0) {
             throw "No .ttf files were found in the bundled archive: $ArchivePath"
         }
 
-        foreach ($fontFile in $fontFiles) {
-            $destination = Join-Path $fontDirectory $fontFile.Name
-            Copy-Item -LiteralPath $fontFile.FullName -Destination $destination -Force
+        $summary.Total = $fontFiles.Count
+        $installedPaths = [System.Collections.Generic.List[string]]::new()
+        $failures = [System.Collections.Generic.List[string]]::new()
 
-            $registryName = ($fontFile.BaseName -replace 'FiraCodeNerdFont', 'FiraCode Nerd Font') + ' (TrueType)'
-            New-ItemProperty -Path $fontRegistryPath -Name $registryName -Value $fontFile.Name -PropertyType String -Force | Out-Null
+        foreach ($fontFile in $fontFiles) {
+            $destination = Join-Path $FontDirectory $fontFile.Name
+
+            $copy = Copy-FontFile -SourcePath $fontFile.FullName -DestinationPath $destination `
+                -MaxAttempts $MaxAttempts -RetryDelayMilliseconds $RetryDelayMilliseconds
+
+            switch ($copy.Status) {
+                'UpToDate' { $summary.UpToDate++ }
+                'Failed'   { $failures.Add("$($fontFile.Name): $($copy.Message)") }
+                default    { $summary.Installed++ }
+            }
+
+            if ($copy.Status -eq 'Failed') {
+                continue
+            }
+
+            $installedPaths.Add($destination)
+
+            # Register against the file that is actually on disk.
+            $displayName = (Get-FontDisplayName -Path $destination) + ' (TrueType)'
+            try {
+                if ((Register-FontFile -RegistryPath $RegistryPath -DisplayName $displayName -FileName $fontFile.Name) -eq 'Registered') {
+                    $summary.Registered++
+                }
+            }
+            catch {
+                $failures.Add("$($fontFile.Name) (registry): $($_.Exception.Message)")
+            }
         }
+
+        # Typed so the property is always an array, never $null.
+        $summary.Failed = [string[]]@($failures)
+
+        if ($installedPaths.Count -gt 0 -and -not $SkipSessionRegistration) {
+            [void](Add-FontToCurrentSession -Paths @($installedPaths))
+        }
+
+        Remove-StaleFontLeftovers -FontDirectory $FontDirectory | Out-Null
     }
     finally {
         if (Test-Path -LiteralPath $extractionDirectory) {
-            Remove-Item -LiteralPath $extractionDirectory -Recurse -Force
+            Remove-Item -LiteralPath $extractionDirectory -Recurse -Force -ErrorAction SilentlyContinue
         }
     }
+
+    return [pscustomobject]$summary
+}
+
+function Remove-StaleFontLeftovers {
+    <#
+        Deletes font files that a previous run had to rename out of the way
+        because they were still in use. Best-effort by design.
+    #>
+    param([Parameter(Mandatory)][string]$FontDirectory)
+
+    if (-not (Test-Path -LiteralPath $FontDirectory)) {
+        return 0
+    }
+
+    $removed = 0
+    $leftovers = @(Get-ChildItem -LiteralPath $FontDirectory -Filter "*$StaleFontSuffix*" -File -ErrorAction SilentlyContinue)
+    foreach ($leftover in $leftovers) {
+        try {
+            Remove-Item -LiteralPath $leftover.FullName -Force -ErrorAction Stop
+            $removed++
+        }
+        catch {
+            # Still mapped into memory - try again after the next sign-out.
+        }
+    }
+
+    return $removed
 }
 
 function Ensure-WinFetch {
@@ -496,6 +946,13 @@ function Configure-WindowsTerminal {
 # Bootstrap
 # -----------------------------------------------------------------------------
 
+# Dot-sourced by the test suite: stop here with only the helpers defined.
+if ($LoadFunctionsOnly) {
+    return
+}
+
+Reset-SetupFailures
+
 Write-Step 'Checking prerequisites'
 Assert-WinGet
 
@@ -554,14 +1011,25 @@ $omp = $ompCommand.Source
 # -----------------------------------------------------------------------------
 
 Write-Step "Installing Nerd Font: $FontName"
-if (Test-FontInstalled -FaceName $FontFace) {
-    Write-Ok "$FontFace is already installed."
-}
-else {
+
+# Deliberately unconditional. The install is idempotent and repairs partial
+# state (files present but unregistered, or an outdated file that is currently
+# in use), which a simple "is it installed?" check would skip right past.
+Invoke-SetupStep -Name 'Nerd Font' -Action {
     $bundledFontArchive = Join-Path $PSScriptRoot 'assets\fonts\FiraCode.zip'
-    Install-BundledNerdFont -ArchivePath $bundledFontArchive
-    Write-Ok "$FontFace installed."
-}
+    $fontResult = Install-BundledNerdFont -ArchivePath $bundledFontArchive
+
+    Write-Ok ("$FontFace - {0} file(s): {1} installed, {2} already current, {3} registry entry(ies) written." -f
+        $fontResult.Total, $fontResult.Installed, $fontResult.UpToDate, $fontResult.Registered)
+
+    if (@($fontResult.Failed).Count -gt 0) {
+        foreach ($failure in $fontResult.Failed) {
+            Write-Warn "Font not updated - $failure"
+        }
+        throw ("{0} of {1} font files could not be written. Close Windows Terminal and any app using FiraCode, then re-run this script." -f
+            @($fontResult.Failed).Count, $fontResult.Total)
+    }
+} | Out-Null
 
 # -----------------------------------------------------------------------------
 # Local Oh My Posh configuration
@@ -570,20 +1038,42 @@ else {
 Write-Step "Preparing Oh My Posh theme: $OhMyPoshTheme"
 $ompConfigDirectory = Join-Path $HOME '.config\oh-my-posh'
 $ompConfigPath = Join-Path $ompConfigDirectory "$OhMyPoshTheme.omp.json"
-New-Item -ItemType Directory -Path $ompConfigDirectory -Force | Out-Null
 
-& $omp config export --config $OhMyPoshTheme --output $ompConfigPath
-if ($LASTEXITCODE -ne 0 -or -not (Test-Path $ompConfigPath)) {
-    throw "Failed to export Oh My Posh theme '$OhMyPoshTheme'."
-}
-Write-Ok "Local prompt theme: $ompConfigPath"
+Invoke-SetupStep -Name 'Oh My Posh theme' -Action {
+    New-Item -ItemType Directory -Path $ompConfigDirectory -Force | Out-Null
+
+    if (Test-Path -LiteralPath $ompConfigPath) {
+        $backup = Backup-File -Path $ompConfigPath
+        Write-Ok "Oh My Posh theme backup: $backup"
+    }
+
+    & $omp config export --config $OhMyPoshTheme --output $ompConfigPath
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $ompConfigPath)) {
+        throw "Failed to export Oh My Posh theme '$OhMyPoshTheme'."
+    }
+
+    # An empty or malformed export would break every new shell, so check it.
+    try {
+        Get-Content -Raw -LiteralPath $ompConfigPath | ConvertFrom-Json -ErrorAction Stop | Out-Null
+    }
+    catch {
+        throw "Exported Oh My Posh theme '$ompConfigPath' is not valid JSON: $($_.Exception.Message)"
+    }
+
+    Write-Ok "Local prompt theme: $ompConfigPath"
+} | Out-Null
 
 # -----------------------------------------------------------------------------
 # WinFetch
 # -----------------------------------------------------------------------------
 
-Ensure-WinFetch
-$winFetchConfigPath = Configure-WinFetch
+$winFetchConfigPath = Invoke-SetupStep -Name 'WinFetch' -Action {
+    Ensure-WinFetch | Out-Null
+    Configure-WinFetch
+}
+if (-not $winFetchConfigPath) {
+    $winFetchConfigPath = '(not configured)'
+}
 
 # -----------------------------------------------------------------------------
 # PowerShell execution policy (only loosen Restricted -> RemoteSigned)
@@ -656,14 +1146,26 @@ if (Get-Command oh-my-posh -ErrorAction SilentlyContinue) {
 $ManagedBlockEnd
 "@
 
-Set-ManagedProfileBlock -ProfilePath $profilePath -Block $profileBlock
-Write-Ok "PowerShell profile configured: $profilePath"
+Invoke-SetupStep -Name 'PowerShell profile' -Action {
+    Set-ManagedProfileBlock -ProfilePath $profilePath -Block $profileBlock
+
+    # A profile that does not parse breaks every new shell, so verify it.
+    $parseErrors = $null
+    [System.Management.Automation.Language.Parser]::ParseFile($profilePath, [ref]$null, [ref]$parseErrors) | Out-Null
+    if (@($parseErrors).Count -gt 0) {
+        throw "The generated profile has $(@($parseErrors).Count) syntax error(s): $($parseErrors[0].Message)"
+    }
+
+    Write-Ok "PowerShell profile configured: $profilePath"
+} | Out-Null
 
 # -----------------------------------------------------------------------------
 # Windows Terminal
 # -----------------------------------------------------------------------------
 
-Configure-WindowsTerminal -PwshPath $pwshPath -FaceName $FontFace
+Invoke-SetupStep -Name 'Windows Terminal' -Action {
+    Configure-WindowsTerminal -PwshPath $pwshPath -FaceName $FontFace
+} | Out-Null
 
 # -----------------------------------------------------------------------------
 # Validation
@@ -671,20 +1173,105 @@ Configure-WindowsTerminal -PwshPath $pwshPath -FaceName $FontFace
 
 Write-Step 'Validating setup'
 
-$validation = [ordered]@{
-    'PowerShell'       = $PSVersionTable.PSVersion.ToString()
-    'PowerShell path'  = $pwshPath
-    'PSReadLine'       = (Get-Module -ListAvailable PSReadLine | Sort-Object Version -Descending | Select-Object -First 1).Version.ToString()
-    'Oh My Posh'       = (& $omp version | Select-Object -First 1)
-    'Nerd Font'        = $FontFace
-    'OMP theme'        = $ompConfigPath
-    'WinFetch config'  = $winFetchConfigPath
-    'PowerShell profile' = $profilePath
-    'Terminal settings'  = (Get-WindowsTerminalSettingsPath)
+# Each check answers "is this actually true on disk right now?", independently
+# of whether the step that was supposed to do it reported success.
+function Test-SetupCheck {
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][scriptblock]$Check
+    )
+
+    try {
+        $detail = & $Check
+        if ($detail) {
+            Write-Host ('    [PASS] {0,-22} {1}' -f $Name, $detail) -ForegroundColor Green
+            return $true
+        }
+        Write-Fail ('{0,-22} check returned no result' -f $Name)
+        return $false
+    }
+    catch {
+        Write-Fail ('{0,-22} {1}' -f $Name, $_.Exception.Message)
+        return $false
+    }
 }
 
-$validation.GetEnumerator() | ForEach-Object {
-    Write-Host ('    {0,-20} {1}' -f ($_.Key + ':'), $_.Value)
+$checks = [ordered]@{
+    'PowerShell 7' = {
+        if ($PSVersionTable.PSVersion.Major -lt 7) { throw 'not running under PowerShell 7' }
+        "$($PSVersionTable.PSVersion) ($pwshPath)"
+    }
+    'PSReadLine' = {
+        $module = Get-Module -ListAvailable PSReadLine | Sort-Object Version -Descending | Select-Object -First 1
+        if (-not $module) { throw 'module not found' }
+        $module.Version.ToString()
+    }
+    'Oh My Posh' = {
+        $version = & $omp version 2>$null | Select-Object -First 1
+        if ([string]::IsNullOrWhiteSpace($version)) { throw 'oh-my-posh did not report a version' }
+        $version
+    }
+    'Nerd Font' = {
+        if (-not (Test-FontInstalled -FaceName $FontFace)) { throw "$FontFace is not installed" }
+        $registered = @((Get-ItemProperty -Path $UserFontRegistryPath -ErrorAction SilentlyContinue).PSObject.Properties |
+            Where-Object { $_.Name -like "*$FontFace*" }).Count
+        "$FontFace ($registered registry entries)"
+    }
+    'Prompt theme' = {
+        if (-not (Test-Path -LiteralPath $ompConfigPath)) { throw "missing: $ompConfigPath" }
+        Get-Content -Raw -LiteralPath $ompConfigPath | ConvertFrom-Json -ErrorAction Stop | Out-Null
+        $ompConfigPath
+    }
+    'WinFetch' = {
+        if (-not (Test-Path -LiteralPath $winFetchConfigPath)) { throw "missing: $winFetchConfigPath" }
+        $winFetchConfigPath
+    }
+    'PowerShell profile' = {
+        if (-not (Test-Path -LiteralPath $profilePath)) { throw "missing: $profilePath" }
+        $content = Get-Content -Raw -LiteralPath $profilePath
+        if ($content -notmatch [regex]::Escape($ManagedBlockStart)) { throw 'managed block is missing' }
+        $profilePath
+    }
+    'Terminal settings' = {
+        $settingsPath = Get-WindowsTerminalSettingsPath
+        if (-not (Test-Path -LiteralPath $settingsPath)) { throw "missing: $settingsPath" }
+        $settings = Read-JsoncAsHashtable -Path $settingsPath
+        if ($settings['defaultProfile'] -ne $PowerShellProfileGuid) { throw 'PowerShell 7 is not the default profile' }
+        if ($settings['profiles']['defaults']['font']['face'] -ne $FontFace) { throw "default font is not $FontFace" }
+        if (-not (@($settings['schemes']) | Where-Object { $_['name'] -eq $TerminalSchemeName })) { throw "$TerminalSchemeName scheme is missing" }
+        $settingsPath
+    }
+}
+
+$failedChecks = 0
+foreach ($check in $checks.GetEnumerator()) {
+    if (-not (Test-SetupCheck -Name $check.Key -Check $check.Value)) {
+        $failedChecks++
+    }
+}
+
+$stepFailures = @(Get-SetupFailures)
+if ($stepFailures.Count -gt 0) {
+    Write-Host ''
+    Write-Host "$($stepFailures.Count) step(s) did not complete:" -ForegroundColor Yellow
+    foreach ($failure in $stepFailures) {
+        Write-Host "    - $failure" -ForegroundColor Yellow
+    }
+}
+
+if ($failedChecks -gt 0 -or $stepFailures.Count -gt 0) {
+    $incompleteMessage = @"
+
+Setup finished with problems: $failedChecks failed check(s), $($stepFailures.Count) failed step(s).
+
+Everything listed as [PASS] above is in place. Re-running this script is safe
+and will retry only what is still missing.
+
+If a font file could not be written, close ALL Windows Terminal windows and any
+other app using FiraCode, then run the script again.
+"@
+    Write-Host $incompleteMessage -ForegroundColor Yellow
+    exit 1
 }
 
 $completionMessage = @"
