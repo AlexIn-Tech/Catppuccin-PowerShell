@@ -4,6 +4,30 @@ A repeatable PowerShell script that provisions a Catppuccin Macchiato command-li
 
 ![Windows Terminal with Catppuccin Macchiato and WinFetch](assets/images/winfetch-preview.png)
 
+## Why this setup?
+
+This setup gives you a consistent, polished PowerShell environment on any Windows PC without manually repeating the same configuration work.
+
+- **Windows Terminal** provides tabs, profiles, modern rendering, and a more comfortable daily shell experience than the legacy console.
+- **PowerShell 7** is the current, actively maintained PowerShell runtime and works well with modern Windows tooling.
+- **Oh My Posh** adds useful context to the prompt at a glance, while Catppuccin Macchiato keeps it readable and easy on the eyes.
+- **FiraCode Nerd Font** enables programming ligatures and the prompt icons, so the theme renders correctly from the first launch.
+- **PSReadLine** improves command editing, history search, syntax highlighting, and inline predictions—less retyping and fewer mistakes.
+- **Catppuccin Macchiato** gives the terminal and prompt one coherent, low-contrast palette, making commands, parameters, errors, and suggestions easier to distinguish.
+- **Repeatable setup and backups** make moving to a new PC painless while preserving copies of existing Terminal and PowerShell profile settings before changes are made.
+
+The goal is not only appearance: it is a faster, more readable, and reproducible command-line environment.
+
+### Go further with Aichat
+
+For an especially nice next step, take a look at [Aichat](https://github.com/sigoden/aichat). Its shell-assistant mode lets you describe what you want to do in natural language and generates a command suited to your shell and operating system. After configuring a provider, try:
+
+```powershell
+aichat -e "show the five largest files in this folder"
+```
+
+Always review a generated command before you run it.
+
 ## What it does
 
 - Installs Windows Terminal, PowerShell 7, and Oh My Posh with WinGet.
