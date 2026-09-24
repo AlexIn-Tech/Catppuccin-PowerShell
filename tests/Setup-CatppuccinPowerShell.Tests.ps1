@@ -293,6 +293,16 @@ Describe 'Install-BundledNerdFont' {
         ($names | Where-Object { $_ -like '*Nerd Font*' }) | Should Not BeNullOrEmpty
     }
 
+    It 'registers full file paths so per-user fonts survive a reboot' {
+        # A bare file name is resolved against C:\Windows\Fonts, so the font
+        # disappears after a restart. Per-user fonts need the absolute path.
+        $values = @((Get-ItemProperty -Path $regPath).PSObject.Properties |
+            Where-Object { $_.Name -like '*FiraCode*' } | ForEach-Object { $_.Value })
+        $values.Count | Should Be 18
+        ($values | Where-Object { -not [System.IO.Path]::IsPathRooted($_) }) | Should BeNullOrEmpty
+        ($values | Where-Object { -not (Test-Path -LiteralPath $_) }) | Should BeNullOrEmpty
+    }
+
     It 'is idempotent: a second run copies nothing and reports everything up to date' {
         $result = Invoke-Install
         $result.UpToDate | Should Be 18

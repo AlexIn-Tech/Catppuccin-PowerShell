@@ -557,6 +557,9 @@ function Register-FontFile {
     <#
         Writes the HKCU font registry entry only when it is missing or wrong, so
         re-runs stay quiet. Returns 'UpToDate' or 'Registered'.
+
+        FileName must be the ABSOLUTE path for a per-user font. A bare file name
+        is looked up in C:\Windows\Fonts, so the font would vanish after reboot.
     #>
     param(
         [Parameter(Mandatory)][string]$RegistryPath,
@@ -690,7 +693,7 @@ function Install-BundledNerdFont {
             # Register against the file that is actually on disk.
             $displayName = (Get-FontDisplayName -Path $destination) + ' (TrueType)'
             try {
-                if ((Register-FontFile -RegistryPath $RegistryPath -DisplayName $displayName -FileName $fontFile.Name) -eq 'Registered') {
+                if ((Register-FontFile -RegistryPath $RegistryPath -DisplayName $displayName -FileName $destination) -eq 'Registered') {
                     $summary.Registered++
                 }
             }
