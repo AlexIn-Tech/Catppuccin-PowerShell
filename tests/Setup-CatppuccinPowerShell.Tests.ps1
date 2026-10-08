@@ -400,6 +400,43 @@ Describe 'Test-FontInstalled' {
     Remove-Item -Path $regPath -Recurse -Force -ErrorAction SilentlyContinue
 }
 
+Describe 'Generated PowerShell profile' {
+    # Evaluate only the profile template, without executing provisioning steps.
+    $setupAst = [System.Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$null, [ref]$null)
+    $assignment = $setupAst.Find({
+        param($node)
+        $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+        $node.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and
+        $node.Left.VariablePath.UserPath -eq 'profileBlock'
+    }, $true)
+    $generatedBlock = & ([scriptblock]::Create($assignment.Right.Extent.Text))
+
+    It 'generates a profile that parses without syntax errors' {
+        $errors = $null
+        [System.Management.Automation.Language.Parser]::ParseInput($generatedBlock, [ref]$null, [ref]$errors) | Out-Null
+        @($errors).Count | Should Be 0
+    }
+
+    It 'loads silently without terminal customization when output is redirected' {
+        $dir = New-TestDirectory
+        try {
+            $profilePath = Join-Path $dir 'profile.ps1'
+            # These sentinels fail even if terminal customization would otherwise
+            # happen to work in a redirected session on the test machine.
+            $sentinels = @"
+function Import-Module { throw 'Unexpected module initialization' }
+function oh-my-posh { throw 'Unexpected prompt initialization' }
+"@
+            Write-Utf8NoBom -Path $profilePath -Content ($sentinels + "`r`n" + $generatedBlock + "`r`nWrite-Output 'profile-loaded'")
+            $pwsh = Get-PwshPath
+            $output = & $pwsh -NoProfile -NonInteractive -File $profilePath 2>&1
+            $LASTEXITCODE | Should Be 0
+            ($output | Out-String).Trim() | Should Be 'profile-loaded'
+        }
+        finally { Remove-TestDirectory $dir }
+    }
+}
+
 Describe 'Set-ManagedProfileBlock' {
     $dir = New-TestDirectory
     $block = "$ManagedBlockStart`r`nWrite-Host 'managed'`r`n$ManagedBlockEnd"

@@ -1113,38 +1113,41 @@ $profileBlock = @"
 $ManagedBlockStart
 # Managed by Setup-CatppuccinPowerShell.ps1. Re-run the setup script to update.
 
-# PSReadLine ------------------------------------------------------------------
-Import-Module PSReadLine
+# Only initialize terminal UI when both console streams are interactive.
+if (`$Host.Name -eq 'ConsoleHost' -and -not [Console]::IsOutputRedirected -and -not [Console]::IsInputRedirected) {
+    # PSReadLine ------------------------------------------------------------------
+    Import-Module PSReadLine
 
-Set-PSReadLineOption -PredictionSource History
-Set-PSReadLineOption -PredictionViewStyle InlineView
-Set-PSReadLineOption -HistoryNoDuplicates
+    Set-PSReadLineOption -PredictionSource History
+    Set-PSReadLineOption -PredictionViewStyle InlineView
+    Set-PSReadLineOption -HistoryNoDuplicates
 
-# Catppuccin Macchiato PSReadLine palette
-Set-PSReadLineOption -Colors @{
-    Command          = "``e[38;2;138;173;244m" # Blue
-    Parameter        = "``e[38;2;198;160;246m" # Mauve
-    Operator         = "``e[38;2;145;215;227m" # Sky
-    Variable         = "``e[38;2;183;189;248m" # Lavender
-    String           = "``e[38;2;166;218;149m" # Green
-    Number           = "``e[38;2;245;169;127m" # Peach
-    Type             = "``e[38;2;238;212;159m" # Yellow
-    Comment          = "``e[38;2;110;115;141m" # Overlay0
-    Keyword          = "``e[38;2;198;160;246m" # Mauve
-    Member           = "``e[38;2;139;213;202m" # Teal
-    Emphasis         = "``e[38;2;245;189;230m" # Pink
-    Error            = "``e[38;2;237;135;150m" # Red
-    InlinePrediction = "``e[38;2;91;96;120m"   # Surface2
-}
+    # Catppuccin Macchiato PSReadLine palette
+    Set-PSReadLineOption -Colors @{
+        Command          = "``e[38;2;138;173;244m" # Blue
+        Parameter        = "``e[38;2;198;160;246m" # Mauve
+        Operator         = "``e[38;2;145;215;227m" # Sky
+        Variable         = "``e[38;2;183;189;248m" # Lavender
+        String           = "``e[38;2;166;218;149m" # Green
+        Number           = "``e[38;2;245;169;127m" # Peach
+        Type             = "``e[38;2;238;212;159m" # Yellow
+        Comment          = "``e[38;2;110;115;141m" # Overlay0
+        Keyword          = "``e[38;2;198;160;246m" # Mauve
+        Member           = "``e[38;2;139;213;202m" # Teal
+        Emphasis         = "``e[38;2;245;189;230m" # Pink
+        Error            = "``e[38;2;237;135;150m" # Red
+        InlinePrediction = "``e[38;2;91;96;120m"   # Surface2
+    }
 
-# RightArrow accepts the whole inline prediction (PSReadLine default).
-# Ctrl+RightArrow accepts only the next suggested word.
-Set-PSReadLineKeyHandler -Chord 'Ctrl+RightArrow' -Function AcceptNextSuggestionWord
+    # RightArrow accepts the whole inline prediction (PSReadLine default).
+    # Ctrl+RightArrow accepts only the next suggested word.
+    Set-PSReadLineKeyHandler -Chord 'Ctrl+RightArrow' -Function AcceptNextSuggestionWord
 
-# Oh My Posh -----------------------------------------------------------------
-`$ompThemePath = Join-Path `$HOME '.config\oh-my-posh\$OhMyPoshTheme.omp.json'
-if (Get-Command oh-my-posh -ErrorAction SilentlyContinue) {
-    oh-my-posh init pwsh --config `$ompThemePath | Invoke-Expression
+    # Oh My Posh -----------------------------------------------------------------
+    `$ompThemePath = Join-Path `$HOME '.config\oh-my-posh\$OhMyPoshTheme.omp.json'
+    if (Get-Command oh-my-posh -ErrorAction SilentlyContinue) {
+        oh-my-posh init pwsh --config `$ompThemePath | Invoke-Expression
+    }
 }
 $ManagedBlockEnd
 "@

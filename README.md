@@ -34,7 +34,7 @@ Always review a generated command before you run it.
 - Installs the repository-bundled FiraCode Nerd Font for the current user—no font download required.
 - Installs WinFetch and configures it to use the bundled Catppuccin Windows image.
 - Exports the `catppuccin_macchiato` Oh My Posh theme locally.
-- Adds a managed Catppuccin block to the PowerShell 7 profile with PSReadLine prediction and syntax colors.
+- Adds a managed Catppuccin block to the PowerShell 7 profile with PSReadLine prediction and syntax colors. PSReadLine and Oh My Posh initialize only in an interactive console with neither input nor output redirected, so scripts and automation can load the profile without terminal UI warnings.
 - Creates a Catppuccin Macchiato color scheme, app theme, and PowerShell 7 profile in Windows Terminal.
 - Creates timestamped backups of existing Windows Terminal and PowerShell profile files before changing them.
 - Validates the result and prints a `[PASS]`/`[FAIL]` report for every component.
